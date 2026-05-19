@@ -1,3 +1,10 @@
+# ngrok 사용하면
+https://xxxx.ngrok-free.app 같은 주소 생성
+
+
+
+
+
 # ngrok 실행
   - cmd
   - ngrok 폴더로 이동 <C:~\ngrok\>
