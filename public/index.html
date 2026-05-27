@@ -1,16 +1,175 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>WebRTC Translator Step 1</title>
+<meta charset="UTF-8">
+<title>Police Translator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 </head>
+
 <body>
 
-<h2>WebRTC Audio Test</h2>
+<h2>🌎 실시간 통역 시스템</h2>
 
-<button onclick="join()">Join Room</button>
+<p>
+언어 선택:
+<select id="lang">
+    <option value="ko">한국어</option>
+    <option value="en">English</option>
+    <option value="ja">日本語</option>
+    <option value="zh">中文</option>
+    <option value="th">ไทย</option>
+    <option value="tl">Tagalog</option>
+    <option value="hi">हिन्दी</option>
+</select>
+</p>
+
+<p>
+룸 번호:
+<input type="text" id="room" value="police-room">
+<button id="join">접속</button>
+</p>
+
+<hr>
+
+<button id="start">🎤 시작</button>
+<button id="stop">🛑 종료 & 전송</button>
+
+<p id="status">대기중</p>
+
+<hr>
+
+<h3>📝 STT 원문</h3>
+<p id="original"></p>
+
+<h3>🌎 번역 결과</h3>
+<p id="translated"></p>
+
+<audio id="player" controls></audio>
 
 <script src="/socket.io/socket.io.js"></script>
-<script src="client.js"></script>
+
+<script>
+
+const socket = io();
+
+let mediaRecorder;
+let chunks = [];
+
+let myLang = "ko";
+
+
+// ========================
+// 룸 접속
+// ========================
+document.getElementById("join").onclick = () => {
+
+    myLang = document.getElementById("lang").value;
+
+    const room = document.getElementById("room").value;
+
+    socket.emit("join", {
+        room,
+        lang: myLang
+    });
+
+    document.getElementById("status").innerText =
+        "✅ 접속 완료";
+};
+
+
+// ========================
+// 녹음 시작
+// ========================
+document.getElementById("start").onclick = async () => {
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+        }
+    });
+
+    chunks = [];
+
+    mediaRecorder = new MediaRecorder(stream, {
+        mimeType: "audio/webm;codecs=opus"
+    });
+
+    mediaRecorder.ondataavailable = (e) => {
+        chunks.push(e.data);
+    };
+
+    mediaRecorder.start();
+
+    document.getElementById("status").innerText =
+        "🎤 녹음 중...";
+};
+
+
+// ========================
+// 종료 후 전송
+// ========================
+document.getElementById("stop").onclick = () => {
+
+    mediaRecorder.stop();
+
+    mediaRecorder.onstop = async () => {
+
+        const blob = new Blob(chunks, {
+            type: "audio/webm"
+        });
+
+        chunks = [];
+
+        const reader = new FileReader();
+
+        reader.onloadend = () => {
+
+            socket.emit("audio", {
+                audio: reader.result
+            });
+        };
+
+        reader.readAsDataURL(blob);
+
+        document.getElementById("status").innerText =
+            "📤 전송 중...";
+    };
+};
+
+
+// ========================
+// STT 표시 (내 말)
+// ========================
+socket.on("my-text", (data) => {
+
+    document.getElementById("original").innerText =
+        data.text;
+});
+
+
+// ========================
+// 번역 결과 (상대 말)
+// ========================
+socket.on("result", (data) => {
+
+    document.getElementById("translated").innerText =
+        data.text;
+
+    const player = document.getElementById("player");
+
+    if (data.audio) {
+
+        player.src = data.audio;
+        player.play();
+    }
+
+    document.getElementById("status").innerText =
+        "✅ 완료";
+});
+
+</script>
 
 </body>
 </html>
