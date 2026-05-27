@@ -1,3 +1,5 @@
+# 현재 index.html 과 server.js 이외는 바탕화면에 있는 것을 넣어야 한다/다른것은 필요없음
+
 # ngrok 사용하면
 https://xxxx.ngrok-free.app 같은 주소 생성
 
