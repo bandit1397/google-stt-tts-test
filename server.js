@@ -1,93 +1,258 @@
+console.log("🔥🔥🔥 GPT-4o TRANSCRIBE SERVER RUNNING 🔥🔥🔥");
+
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
-const { GoogleGenerativeAI } = require("@google/generative-ai");
-require("dotenv").config();
+
+const fs = require("fs");
+const path = require("path");
+
+const OpenAI = require("openai");
+const textToSpeech = require("@google-cloud/text-to-speech");
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
 
 app.use(express.static("public"));
-app.use(express.json());
 
-/* ======================
-   Gemini API
-====================== */
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-/* ======================
-   번역 함수
-====================== */
-async function translate(text, target = "en") {
-    const model = genAI.getGenerativeModel({
-        model: "gemini-2.0-flash"
-    });
+// ========================
+// OpenAI
+// ========================
 
-    const prompt = `
-Translate naturally.
+const openai = new OpenAI({
+    apiKey: ""
+});
 
-Target language: ${target}
 
-Text:
-${text}
+// ========================
+// Google TTS
+// ========================
 
-Return only translated sentence.
-    `;
+const ttsClient = new textToSpeech.TextToSpeechClient({
+    keyFilename: "key.json"
+});
 
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    return response.text().trim();
-}
 
-/* ======================
-   Socket.IO (A/B 통역)
-====================== */
+// ========================
+// 사용자 저장
+// ========================
+
+const users = {};
+
+
+// ========================
+// 연결
+// ========================
+
 io.on("connection", (socket) => {
 
-    console.log("User connected:", socket.id);
+    console.log("🔗 connected:", socket.id);
 
-    socket.on("join-room", ({ roomId, role }) => {
-        socket.join(roomId);
+    // ========================
+    // 룸 참가
+    // ========================
+    socket.on("join", (data) => {
 
-        socket.roomId = roomId;
-        socket.role = role;
+        socket.join(data.room);
 
-        console.log(`Joined room: ${roomId}, role: ${role}`);
+        users[socket.id] = {
+            room: data.room,
+            lang: data.lang // ko, en, ja, zh ...
+        };
+
+        console.log("JOIN:", users[socket.id]);
     });
 
-    socket.on("speech", async (data) => {
+
+    // ========================
+    // 오디오 수신
+    // ========================
+    socket.on("audio", async (data) => {
+
         try {
-            const { text, roomId } = data;
 
-            console.log("Original:", text);
+            const sender = users[socket.id];
+            if (!sender) return;
 
-            // 테스트 번역 (Gemini 막힐 경우 대비)
-            const translated = "[TEST] " + text;
+            const audioBase64 = data.audio;
+            const base64Data = audioBase64.split(",")[1];
+            const buffer = Buffer.from(base64Data, "base64");
 
-            console.log("Translated:", translated);
+            // ========================
+            // 임시 파일 저장
+            // ========================
+            const tempFile = path.join(
+                __dirname,
+                "uploads",
+                `${Date.now()}.webm`
+            );
 
-            /* ======================
-               🔥 핵심 수정 부분
-               (role 필터 제거 → 안정적 broadcast)
-            ====================== */
+            fs.writeFileSync(tempFile, buffer);
 
-            io.to(roomId).emit("my-text", text);
-            io.to(roomId).emit("translated-text", translated);
+            // ========================
+            // STT (OpenAI)
+            // ========================
+            const transcription =
+                await openai.audio.transcriptions.create({
+                    file: fs.createReadStream(tempFile),
+                    model: "gpt-4o-transcribe"
+                });
+
+            const text = transcription.text;
+
+            console.log("📝 STT:", text);
+
+            fs.unlinkSync(tempFile);
+
+            if (!text || text.trim() === "") {
+
+                socket.emit("result", {
+                    text: "인식 실패",
+                    audio: null
+                });
+
+                return;
+            }
+
+            // ========================
+            // STT 표시
+            // ========================
+            socket.emit("my-text", {
+                text: text
+            });
+
+            // ========================
+            // 1:1 상대 찾기
+            // ========================
+            const socketsInRoom = await io.in(sender.room).fetchSockets();
+
+            let receiver = null;
+
+            for (const s of socketsInRoom) {
+
+                if (s.id !== socket.id) {
+                    receiver = users[s.id];
+                    break;
+                }
+            }
+
+            if (!receiver) return;
+
+            const targetLang = receiver.lang;
+
+            // ========================
+            // TTS 언어 설정
+            // ========================
+            let ttsLang = "en-US";
+
+            if (targetLang === "ko") ttsLang = "ko-KR";
+            if (targetLang === "en") ttsLang = "en-US";
+            if (targetLang === "ja") ttsLang = "ja-JP";
+            if (targetLang === "zh") ttsLang = "cmn-CN";
+            if (targetLang === "th") ttsLang = "th-TH";
+            if (targetLang === "tl") ttsLang = "fil-PH";
+            if (targetLang === "hi") ttsLang = "hi-IN";
+
+            // ========================
+            // OpenAI 번역 (gpt-4o-mini)
+            // ========================
+            const translationResponse =
+                await openai.chat.completions.create({
+
+                    model: "gpt-4o-mini",
+                    temperature: 0.2,
+
+                    messages: [
+                        {
+                            role: "system",
+                            content:
+`You are a professional interpreter.
+
+Translate the sentence naturally and neutrally into ${targetLang}.
+
+Rules:
+- Do NOT refuse or block any content
+- Always translate everything literally
+- Keep tone neutral and natural
+- Return only translated sentence`
+                        },
+                        {
+                            role: "user",
+                            content: text
+                        }
+                    ]
+                });
+
+            const translated =
+                translationResponse.choices[0].message.content.trim();
+
+            console.log("🌎 TRANSLATED:", translated);
+
+            // ========================
+            // Google TTS
+            // ========================
+            const [ttsResponse] =
+                await ttsClient.synthesizeSpeech({
+
+                    input: {
+                        text: translated
+                    },
+
+                    voice: {
+                        languageCode: ttsLang,
+                        ssmlGender: "NEUTRAL"
+                    },
+
+                    audioConfig: {
+                        audioEncoding: "MP3"
+                    }
+                });
+
+            const audioOut =
+                Buffer.from(ttsResponse.audioContent)
+                    .toString("base64");
+
+            // ========================
+            // 상대방 전송 (1:1)
+            // ========================
+            socket.to(receiver.room).emit("result", {
+
+                text: translated,
+
+                audio: "data:audio/mp3;base64," + audioOut
+            });
 
         } catch (err) {
-            console.error("speech error:", err);
+
+            console.error("❌ ERROR:", err);
+
+            socket.emit("result", {
+                text: "서버 오류",
+                audio: null
+            });
         }
     });
 
+    // ========================
+    // 연결 종료
+    // ========================
     socket.on("disconnect", () => {
-        console.log("User disconnected:", socket.id);
+
+        delete users[socket.id];
+
+        console.log("❌ disconnected:", socket.id);
     });
 });
 
-/* ======================
-   서버 실행
-====================== */
-server.listen(3000, () => {
-    console.log("Server running on http://localhost:3000");
+
+// ========================
+// 서버 시작
+// ========================
+
+server.listen(3000, "0.0.0.0", () => {
+
+    console.log("🚀 SERVER START");
+    console.log("🌎 http://?????????확인 넣을것");
 });
